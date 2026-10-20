@@ -6,71 +6,82 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
-	"unicode/utf8"
 )
 
 // Handler handles HTTP requests for the Auth service.
 type Handler struct {
-	repo *UserRepository
+	service *Service
 }
 
 // Register registers a new user.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
-	var request struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	defer r.Body.Close()
-
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(&request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	request, ok := readCredentials(w, r)
+	if !ok {
 		return
 	}
 
-	// После первого JSON не должно быть других данных.
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		writeError(w, http.StatusBadRequest, "expected one JSON object")
+	user, err := h.service.Register(r.Context(), request.Email, request.Password)
+	if errors.Is(err, ErrInvalidEmail) || errors.Is(err, ErrInvalidPassword) {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	email := strings.ToLower(strings.TrimSpace(request.Email))
-	if err := checkEmail(email); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid email")
-		return
-	}
-
-	if utf8.RuneCountInString(request.Password) < 8 || len(request.Password) > 72 {
-		writeError(w, http.StatusBadRequest, "invalid password")
-		return
-	}
-
-	hash, err := hashPassword(request.Password)
-	if err != nil {
-		log.Printf("error hashing password: %v", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-
-	user, err := h.repo.Create(r.Context(), email, hash)
 	if errors.Is(err, ErrEmailTaken) {
 		writeError(w, http.StatusConflict, "email already taken")
 		return
 	}
 	if err != nil {
-		log.Printf("error creating user: %v", err)
+		log.Printf("error registering user: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, userResponse{ID: user.ID, Email: user.Email, CreatedAt: user.CreatedAt})
 
+}
+
+// Login authenticates a user and returns a JWT.
+func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
+	request, ok := readCredentials(w, r)
+	if !ok {
+		return
+	}
+
+	token, err := h.service.Login(r.Context(), request.Email, request.Password)
+	if errors.Is(err, ErrInvalidCredentials) {
+		writeError(w, http.StatusUnauthorized, "invalid email or password")
+		return
+	}
+	if err != nil {
+		log.Printf("error logging in user: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	writeJSON(w, http.StatusOK, token)
+}
+
+type credentialsRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+func readCredentials(w http.ResponseWriter, r *http.Request) (credentialsRequest, bool) {
+	var request credentialsRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	defer r.Body.Close()
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return request, false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "expected one JSON object")
+		return request, false
+	}
+	return request, true
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

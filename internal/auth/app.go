@@ -19,6 +19,7 @@ type Config struct {
 	HTTPAddr    string
 	DatabaseURL string
 	JWTSecret   string
+	JWTTokenTTL time.Duration
 }
 
 func loadConfig() (*Config, error) {
@@ -39,6 +40,15 @@ func loadConfig() (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.JWTSecret) == "" {
 		return nil, errors.New("AUTH_JWT_SECRET is required")
+	}
+	ttl := strings.TrimSpace(os.Getenv("AUTH_JWT_TTL"))
+	cfg.JWTTokenTTL = defaultAccessTokenTTL
+	if ttl != "" {
+		parsed, err := time.ParseDuration(ttl)
+		if err != nil || parsed < time.Second || parsed%time.Second != 0 {
+			return nil, errors.New("AUTH_JWT_TTL must be a positive duration in whole seconds (for example 15m)")
+		}
+		cfg.JWTTokenTTL = parsed
 	}
 	return cfg, nil
 }
@@ -62,10 +72,12 @@ func Run() error {
 	fmt.Println("Auth connected to PostgreSQL; waiting for shutdown signal")
 
 	repo := &UserRepository{pool: pool}
-	handler := &Handler{repo: repo}
+	service := &Service{repo: repo, jwtSecret: cfg.JWTSecret, jwtTTL: cfg.JWTTokenTTL}
+	handler := &Handler{service: service}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /auth/register", handler.Register)
+	mux.HandleFunc("POST /auth/login", handler.Login)
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

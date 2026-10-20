@@ -4,15 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/mail"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 var (
@@ -36,31 +33,6 @@ type userResponse struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-func checkEmail(email string) error {
-	if email == "" {
-		return errors.New("empty email")
-	}
-
-	address, err := mail.ParseAddress(email)
-	if err != nil || address.Name != "" || address.Address != email {
-		return errors.New("invalid email")
-	}
-	return nil
-}
-
-func hashPassword(password string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), 14)
-	if err != nil {
-		return "", fmt.Errorf("failed to hash password: %w", err)
-	}
-
-	return string(hash), nil
-}
-
-func checkPassword(password, hash string) error {
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-}
-
 // UserRepository stores and retrieves users in PostgreSQL.
 type UserRepository struct {
 	pool *pgxpool.Pool
@@ -68,15 +40,6 @@ type UserRepository struct {
 
 // Create stores a new user with an already hashed password.
 func (r *UserRepository) Create(ctx context.Context, email string, passwordHash string) (User, error) {
-	email = strings.ToLower(strings.TrimSpace(email))
-
-	if err := checkEmail(email); err != nil {
-		return User{}, err
-	}
-	if strings.TrimSpace(passwordHash) == "" {
-		return User{}, errors.New("password hash is required")
-	}
-
 	var user User
 	err := r.pool.QueryRow(ctx, `
 		INSERT INTO users (email, password_hash)
