@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package auth.v1;
+option go_package = "microservices_project/gen/auth/v1;authv1";
+
+service AuthService {
+  rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
+}
+
+message ValidateTokenRequest {
+  // Raw JWT, without the Bearer prefix.
+  string token = 1;
+}
+
+message ValidateTokenResponse {
+  int64 user_id = 1;
+}

@@ -42,3 +42,21 @@ func TestLoadConfigJWTLifetime(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfigGRPCAddress(t *testing.T) {
+	t.Setenv("AUTH_DATABASE_URL", "postgres://unused")
+	t.Setenv("AUTH_JWT_SECRET", "test-secret")
+	t.Setenv("AUTH_JWT_TTL", "15m")
+	for _, tt := range []struct{ value, want string }{
+		{"", ":9091"}, {"   ", ":9091"}, {"127.0.0.1:19091", "127.0.0.1:19091"},
+	} {
+		t.Setenv("AUTH_GRPC_ADDR", tt.value)
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.GRPCAddr != tt.want {
+			t.Fatalf("got %q, want %q", cfg.GRPCAddr, tt.want)
+		}
+	}
+}

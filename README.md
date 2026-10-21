@@ -8,7 +8,7 @@ The project contains three services:
 - **Blog** — placeholder for the articles API.
 - **Notification** — placeholder for registration notifications.
 
-gRPC and Kafka integration are not implemented yet.
+Auth exposes JWT validation over gRPC. Blog integration and Kafka are not implemented yet.
 
 ## Requirements
 
@@ -106,7 +106,7 @@ issuer `auth-service` in `iss`, audience `blog-service` in `aud`, and `iat`/`exp
 Use it as `Authorization: Bearer <JWT>` when calling protected endpoints.
 Auth validates token signatures, HS256, expiration, issuer, audience, and a
 positive integer user ID in `sub`. Future `iat` and `nbf` claims are rejected.
-Protected endpoints and token validation over gRPC are not implemented yet.
+Protected Blog endpoints are not implemented yet.
 Login compares the password against the stored bcrypt hash without applying
 registration password length rules again.
 
@@ -141,3 +141,39 @@ docker compose down
 ```
 
 Database data remains in the Docker volume.
+
+## gRPC token validation
+
+Auth starts HTTP (`AUTH_HTTP_ADDR`, default `:8081`) and gRPC
+(`AUTH_GRPC_ADDR`, default `:9091`) in the same process with `go run ./cmd/auth`.
+The gRPC listener uses plaintext transport for local development; keep it on a
+trusted local network. Both servers shut down on SIGINT/SIGTERM, with a shared
+10-second grace period.
+
+Contract: `api/proto/auth/v1/auth.proto`. Method:
+`auth.v1.AuthService/ValidateToken`. Send the raw JWT in `token`, without
+`Bearer `. A successful response contains positive `user_id`. Invalid, empty,
+or expired tokens return `Unauthenticated`; internal failures return `Internal`
+without exposing details. Validation checks the JWT locally and does not query
+PostgreSQL or check whether the user has subsequently been deleted.
+
+Example using grpcurl (install separately), after logging in:
+
+```bash
+grpcurl -plaintext -import-path api/proto -proto auth/v1/auth.proto \
+  -d '{"token":"<JWT from login>"}' \
+  localhost:9091 auth.v1.AuthService/ValidateToken
+```
+
+Reflection is not enabled, so grpcurl needs the local proto file.
+For Go callers, use `authv1.NewAuthServiceClient(conn)` from
+`microservices_project/gen/auth/v1`, reuse the connection, and set a request
+deadline with `context.WithTimeout`. Blog will later map `Unauthenticated` to
+HTTP `401` and Auth unavailability/timeouts to `503`.
+
+Generated Go files are committed; normal builds do not need protoc.
+To regenerate, install protoc **33.5**, then run `make proto`.
+The Makefile installs pinned `protoc-gen-go` **v1.36.11** and
+`protoc-gen-go-grpc` **v1.6.1** into `.tools/bin`.
+`go test ./internal/auth -run TestGRPCValidateToken -v` checks the actual gRPC
+client/server exchange in memory without requiring PostgreSQL.
