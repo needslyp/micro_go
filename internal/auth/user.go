@@ -42,7 +42,7 @@ type UserRepository struct {
 func (r *UserRepository) Create(ctx context.Context, email string, passwordHash string) (User, error) {
 	var user User
 	err := r.pool.QueryRow(ctx, `
-		INSERT INTO users (email, password_hash)
+		INSERT INTO auth.users (email, password_hash)
 		VALUES ($1, $2)
 		RETURNING id, email, password_hash, created_at`,
 		email, passwordHash).Scan(
@@ -69,7 +69,7 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (User, er
 	var user User
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, email, password_hash, created_at
-		FROM users
+		FROM auth.users
 		WHERE email = $1`,
 		email).Scan(
 		&user.ID,

@@ -18,8 +18,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// Each test uses a separate schema and applies the real Auth migration.
-// AUTH_TEST_DATABASE_URL must point to a database where schemas may be created.
+// Each test uses a separate database because repository queries name auth.users.
+// AUTH_TEST_DATABASE_URL must use a role with CREATEDB permission.
 func authTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("AUTH_TEST_DATABASE_URL")
@@ -33,35 +33,79 @@ func authTestPool(t *testing.T) *pgxpool.Pool {
 		t.Fatal(err)
 	}
 	t.Cleanup(admin.Close)
-	schema := pgx.Identifier{fmt.Sprintf("auth_test_%d", time.Now().UnixNano())}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+	database := fmt.Sprintf("auth_test_%d", time.Now().UnixNano())
+	quoted := pgx.Identifier{database}.Sanitize()
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+quoted+" TEMPLATE template0"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if _, err := admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE"); err != nil {
-			t.Errorf("clean up test schema: %v", err)
+		if _, err := admin.Exec(ctx, "DROP DATABASE "+quoted+" WITH (FORCE)"); err != nil {
+			t.Errorf("clean up test database: %v", err)
 		}
 	})
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	cfg.ConnConfig.Database = database
+	cfg.ConnConfig.RuntimeParams["search_path"] = "public"
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	migration, err := os.ReadFile("../../migrations/auth/00001_create_users.up.sql")
+	applyAuthMigration(t, pool, "00001_create_users.up.sql")
+	applyAuthMigration(t, pool, "00002_move_users_to_auth.up.sql")
+	return pool
+}
+
+func applyAuthMigration(t *testing.T, pool *pgxpool.Pool, name string) {
+	t.Helper()
+	migration, err := os.ReadFile("../../migrations/auth/" + name)
 	if err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if _, err := pool.Exec(ctx, string(migration)); err != nil {
+		t.Fatalf("apply %s: %v", name, err)
+	}
+}
+
+func TestAuthSchemaMigrationIntegration(t *testing.T) {
+	pool := authTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	applyAuthMigration(t, pool, "00002_move_users_to_auth.down.sql")
+	var id int64
+	if err := pool.QueryRow(ctx, `INSERT INTO public.users (email, password_hash)
+ VALUES ('existing@example.com', 'existing-hash') RETURNING id`).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
-	return pool
+	for _, direction := range []string{"up", "down", "up"} {
+		applyAuthMigration(t, pool, "00002_move_users_to_auth."+direction+".sql")
+		table := "auth.users"
+		if direction == "down" {
+			table = "public.users"
+		}
+		var email, hash string
+		if err := pool.QueryRow(ctx, "SELECT email, password_hash FROM "+table+" WHERE id = $1", id).Scan(&email, &hash); err != nil {
+			t.Fatal(err)
+		}
+		if email != "existing@example.com" || hash != "existing-hash" {
+			t.Fatal("migration changed existing user")
+		}
+	}
+	var nextID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO auth.users (email, password_hash)
+ VALUES ('next@example.com', 'next-hash') RETURNING id`).Scan(&nextID); err != nil {
+		t.Fatal(err)
+	}
+	if nextID <= id {
+		t.Fatal("identity sequence did not advance after schema migration")
+	}
 }
 
 func TestAuthRegistrationAndLoginIntegration(t *testing.T) {
@@ -103,7 +147,7 @@ func TestAuthRegistrationAndLoginIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var email, hash string
-	if err := pool.QueryRow(ctx, "SELECT email, password_hash FROM users WHERE id = $1", user.ID).Scan(&email, &hash); err != nil {
+	if err := pool.QueryRow(ctx, "SELECT email, password_hash FROM auth.users WHERE id = $1", user.ID).Scan(&email, &hash); err != nil {
 		t.Fatal(err)
 	}
 	if email != user.Email || hash == "password123" || bcrypt.CompareHashAndPassword([]byte(hash), []byte("password123")) != nil {
@@ -111,7 +155,7 @@ func TestAuthRegistrationAndLoginIntegration(t *testing.T) {
 	}
 	request("/auth/register", `{"email":"USER@example.com","password":"different123"}`, http.StatusConflict)
 	var count int
-	if err := pool.QueryRow(ctx, "SELECT count(*) FROM users").Scan(&count); err != nil {
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM auth.users").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {

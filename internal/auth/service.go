@@ -13,9 +13,12 @@ import (
 )
 
 var (
+	// ErrInvalidCredentials indicates that the email or password is incorrect.
 	ErrInvalidCredentials = errors.New("invalid email or password")
-	ErrInvalidEmail       = errors.New("invalid email")
-	ErrInvalidPassword    = errors.New("invalid password")
+	// ErrInvalidEmail indicates that the email does not pass validation.
+	ErrInvalidEmail = errors.New("invalid email")
+	// ErrInvalidPassword indicates that the password does not meet registration requirements.
+	ErrInvalidPassword = errors.New("invalid password")
 )
 
 // Service implements authentication rules.

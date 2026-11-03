@@ -12,6 +12,7 @@ import (
 
 const defaultAccessTokenTTL = 15 * time.Minute
 
+// ErrInvalidToken indicates that the token does not meet access requirements.
 var ErrInvalidToken = errors.New("invalid access token")
 
 // TokenResponse contains the signed access token and its lifetime in seconds.

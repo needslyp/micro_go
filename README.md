@@ -1,179 +1,57 @@
 # Microservices Project
 
-A learning project built with Go and PostgreSQL.
+Проект на Go с тремя сервисами:
 
-The project contains three services:
+- **Auth** — регистрация, вход, JWT и проверка токенов через gRPC.
+- **Blog** — API статей, в разработке.
+- **Notification** — уведомления о регистрации через Kafka, в разработке.
 
-- **Auth** — user registration, bcrypt password verification, and JWT login.
-- **Blog** — placeholder for the articles API.
-- **Notification** — placeholder for registration notifications.
+PostgreSQL использует общую базу `microservices` с отдельными схемами сервисов.
+Сейчас через Docker запускается PostgreSQL, а Auth — локально.
 
-Auth exposes JWT validation over gRPC. Blog integration and Kafka are not implemented yet.
+## Запуск
 
-## Requirements
+Требуются Go 1.26+, Docker Compose и CLI `golang-migrate` с поддержкой PostgreSQL.
+Команды выполняются из корня проекта в Bash.
 
-- Go 1.26 or newer
-- Docker with Docker Compose
-- golang-migrate CLI with PostgreSQL support
+1. Создайте `.env`, если его ещё нет:
 
-Run all commands from the project root.
+   ```bash
+   cp .env.example .env
+   ```
 
-## Local setup
+   Укажите в `.env` случайный секрет в `AUTH_JWT_SECRET`.
 
-Create the configuration file if it does not exist:
+2. Загрузите зависимости и запустите PostgreSQL:
 
-```bash
-cp .env.example .env
-```
+   ```bash
+   go mod download
+   docker compose up -d --wait postgres
+   ```
 
-Set `AUTH_JWT_SECRET` in `.env` to a strong random secret used to sign JWTs.
+3. Загрузите настройки и примените миграции Auth:
 
-Download Go dependencies:
+   ```bash
+   set -a
+   source .env
+   set +a
+   migrate -path migrations/auth -database "$AUTH_DATABASE_URL" up
+   ```
 
-```bash
-go mod tidy
-```
+   Сообщение `no change` означает, что миграции уже применены.
 
-Start PostgreSQL:
+4. Запустите Auth:
 
-```bash
-docker compose up -d --wait postgres
-```
+   ```bash
+   go run ./cmd/auth
+   ```
 
-Load environment variables into your shell and apply migrations:
+   HTTP: `localhost:8081`, gRPC: `localhost:9091`.
 
-```bash
-set -a
-source .env
-set +a
-
-migrate -path migrations/auth -database "$AUTH_DATABASE_URL" up
-```
-
-The environment-loading commands above are for Bash.
-`no change` means all migrations have already been applied.
-
-Start Auth:
-
-```bash
-go run ./cmd/auth
-```
-
-By default, Auth listens on `http://localhost:8081`.
-Only PostgreSQL runs in Docker; Auth runs on the host.
-
-## Register a user
-
-Run in another terminal:
-
-```bash
-curl -i http://localhost:8081/auth/register \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"user@example.com","password":"password123"}'
-```
-
-A successful request returns `201 Created` with the user's
-`id`, `email`, and `created_at`. Passwords and hashes are not returned.
-
-Other responses:
-
-- `400` — invalid input
-- `409` — email already registered
-- `500` — internal error
-
-Passwords must contain at least 8 Unicode code points
-and must not exceed 72 bytes.
-
-## Log in
-
-```bash
-curl -i http://localhost:8081/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"user@example.com","password":"password123"}'
-```
-
-A successful request returns `200 OK`:
-
-```json
-{"access_token":"<JWT>","token_type":"Bearer","expires_in":900}
-```
-
-Set `AUTH_JWT_TTL` to a positive Go duration in whole seconds, such as `30m`
-or `1h` (default: `15m`). Invalid values prevent Auth from starting.
-
-The HS256 token uses this lifetime and includes the user ID in `sub`,
-issuer `auth-service` in `iss`, audience `blog-service` in `aud`, and `iat`/`exp` timestamps.
-Use it as `Authorization: Bearer <JWT>` when calling protected endpoints.
-Auth validates token signatures, HS256, expiration, issuer, audience, and a
-positive integer user ID in `sub`. Future `iat` and `nbf` claims are rejected.
-Protected Blog endpoints are not implemented yet.
-Login compares the password against the stored bcrypt hash without applying
-registration password length rules again.
-
-Responses: `400` for malformed JSON, `401` for an unknown email or incorrect
-password (the same error message), and `500` for internal errors.
-
-## Checks
-
-```bash
-go test ./...
-go vet ./...
-```
-
-PostgreSQL integration tests are skipped unless `AUTH_TEST_DATABASE_URL` is set.
-Use a dedicated test database with permission to create schemas. Each run applies
-the Auth migration in an isolated schema and removes that schema afterwards:
-
-```bash
-AUTH_TEST_DATABASE_URL='postgres://auth_test:auth_test_password@localhost:15432/auth_test?sslmode=disable' \
-  go test ./internal/auth -run Integration -count=1 -v
-```
-
-The integration test covers registration, email normalization, stored bcrypt
-hashes, duplicate email rejection, login JWTs, and invalid credentials.
-
-## Stop
-
-Stop Auth with `Ctrl+C`, then stop PostgreSQL:
+Для остановки Auth нажмите `Ctrl+C`, затем остановите PostgreSQL:
 
 ```bash
 docker compose down
 ```
 
-Database data remains in the Docker volume.
-
-## gRPC token validation
-
-Auth starts HTTP (`AUTH_HTTP_ADDR`, default `:8081`) and gRPC
-(`AUTH_GRPC_ADDR`, default `:9091`) in the same process with `go run ./cmd/auth`.
-The gRPC listener uses plaintext transport for local development; keep it on a
-trusted local network. Both servers shut down on SIGINT/SIGTERM, with a shared
-10-second grace period.
-
-Contract: `api/proto/auth/v1/auth.proto`. Method:
-`auth.v1.AuthService/ValidateToken`. Send the raw JWT in `token`, without
-`Bearer `. A successful response contains positive `user_id`. Invalid, empty,
-or expired tokens return `Unauthenticated`; internal failures return `Internal`
-without exposing details. Validation checks the JWT locally and does not query
-PostgreSQL or check whether the user has subsequently been deleted.
-
-Example using grpcurl (install separately), after logging in:
-
-```bash
-grpcurl -plaintext -import-path api/proto -proto auth/v1/auth.proto \
-  -d '{"token":"<JWT from login>"}' \
-  localhost:9091 auth.v1.AuthService/ValidateToken
-```
-
-Reflection is not enabled, so grpcurl needs the local proto file.
-For Go callers, use `authv1.NewAuthServiceClient(conn)` from
-`microservices_project/gen/auth/v1`, reuse the connection, and set a request
-deadline with `context.WithTimeout`. Blog will later map `Unauthenticated` to
-HTTP `401` and Auth unavailability/timeouts to `503`.
-
-Generated Go files are committed; normal builds do not need protoc.
-To regenerate, install protoc **33.5**, then run `make proto`.
-The Makefile installs pinned `protoc-gen-go` **v1.36.11** and
-`protoc-gen-go-grpc` **v1.6.1** into `.tools/bin`.
-`go test ./internal/auth -run TestGRPCValidateToken -v` checks the actual gRPC
-client/server exchange in memory without requiring PostgreSQL.
+Данные сохраняются в Docker volume.

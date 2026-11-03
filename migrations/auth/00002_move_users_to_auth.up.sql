@@ -1,0 +1,3 @@
+CREATE SCHEMA IF NOT EXISTS auth;
+
+ALTER TABLE public.users SET SCHEMA auth;
