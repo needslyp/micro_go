@@ -3,13 +3,14 @@ package blog
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"strconv"
 )
 
-// Handler handles HTTP requests for the Auth service.
+// Handler handles HTTP requests for the Blog service.
 type Handler struct {
 	service *Service
 }
@@ -33,7 +34,7 @@ func toArticleListResponse(article Article) articleResponse {
 
 // GetByID handle function to find article by ID
 func (h *Handler) GetByID(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid article id")
 		return
@@ -94,7 +95,8 @@ func readPagination(r *http.Request) (offset, limit int, err error) {
 func (h *Handler) GetList(w http.ResponseWriter, r *http.Request) {
 	offset, limit, err := readPagination(r)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeError(w, http.StatusBadRequest, "invalid pagination")
+		return
 	}
 
 	articles, err := h.service.GetList(r.Context(), limit, offset)
@@ -114,6 +116,121 @@ func (h *Handler) GetList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, articleListResponse{Items: items, Limit: limit, Offset: offset})
+}
+
+type articleRequest struct {
+	Title *string `json:"title"`
+	Body  *string `json:"body"`
+}
+
+func readArticle(w http.ResponseWriter, r *http.Request) (articleRequest, bool) {
+	var request articleRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	defer r.Body.Close()
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(&request)
+	if err == nil {
+		var extra any
+		if nextErr := decoder.Decode(&extra); nextErr != io.EOF {
+			err = nextErr
+			if err == nil {
+				err = errors.New("additional JSON value")
+			}
+		}
+	}
+	if err != nil {
+		var sizeErr *http.MaxBytesError
+		if errors.As(err, &sizeErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid JSON")
+		}
+		return request, false
+	}
+	if request.Title == nil || request.Body == nil {
+		writeError(w, http.StatusBadRequest, "title and body are required")
+		return request, false
+	}
+	return request, true
+}
+
+// Create stores an article for the authenticated user.
+func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
+	authorID, ok := userIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "invalid access token")
+		return
+	}
+	request, ok := readArticle(w, r)
+	if !ok {
+		return
+	}
+	article, err := h.service.Create(r.Context(), authorID, *request.Title, *request.Body)
+	if err != nil {
+		writeArticleError(w, err)
+		return
+	}
+	w.Header().Set("Location", "/articles/"+strconv.FormatInt(article.ID, 10))
+	writeJSON(w, http.StatusCreated, toArticleListResponse(article))
+}
+
+// Update replaces the title and body of an article owned by the authenticated user.
+func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
+	authorID, ok := userIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "invalid access token")
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid article id")
+		return
+	}
+	request, ok := readArticle(w, r)
+	if !ok {
+		return
+	}
+	article, err := h.service.Update(r.Context(), id, authorID, *request.Title, *request.Body)
+	if err != nil {
+		writeArticleError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toArticleListResponse(article))
+}
+
+// Delete removes an article owned by the authenticated user.
+func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
+	authorID, ok := userIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "invalid access token")
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid article id")
+		return
+	}
+	if err := h.service.Delete(r.Context(), id, authorID); err != nil {
+		writeArticleError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func writeArticleError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrInvalidArticleID), errors.Is(err, ErrInvalidAuthorID),
+		errors.Is(err, ErrInvalidTitle), errors.Is(err, ErrInvalidBody):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrArticleNotFound):
+		writeError(w, http.StatusNotFound, "article not found")
+	case errors.Is(err, ErrForbidden):
+		writeError(w, http.StatusForbidden, "forbidden")
+	default:
+		log.Printf("write article: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

@@ -2,11 +2,21 @@ package blog
 
 import (
 	"context"
+	"encoding/json"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+
 	"errors"
 	"fmt"
+	authv1 "microservices_project/gen/auth/v1"
 	"os"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -107,4 +117,127 @@ func TestArticleUpdateDeleteIntegration(t *testing.T) {
 	if err := repo.Delete(ctx, original.ID, 1); !errors.Is(err, ErrArticleNotFound) {
 		t.Fatalf("delete missing: %v", err)
 	}
+}
+
+func TestProtectedArticleHTTPIntegration(t *testing.T) {
+	pool := blogTestPool(t)
+	client := authClientFunc(func(_ context.Context, req *authv1.ValidateTokenRequest, _ ...grpc.CallOption) (*authv1.ValidateTokenResponse, error) {
+		switch req.GetToken() {
+		case "owner":
+			return &authv1.ValidateTokenResponse{UserId: 1}, nil
+		case "other":
+			return &authv1.ValidateTokenResponse{UserId: 2}, nil
+		default:
+			return nil, status.Error(codes.Unauthenticated, "invalid token")
+		}
+	})
+	router := newRouter(&Handler{service: &Service{repo: &ArticleRepository{pool: pool}}}, client)
+	request := func(method, path, token, body string, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		if response.Code != want {
+			t.Fatalf("%s %s: status=%d, want=%d, body=%s", method, path, response.Code, want, response.Body.String())
+		}
+		return response
+	}
+	request("POST", "/articles", "", "", 401)
+	request("POST", "/articles", "invalid", "", 401)
+	created := request("POST", "/articles", "owner", `{"title":"  Title  ","body":"Text"}`, 201)
+	var article articleResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &article); err != nil {
+		t.Fatal(err)
+	}
+	if article.AuthorID != 1 || article.Title != "Title" {
+		t.Fatalf("unexpected article: %+v", article)
+	}
+	path := "/articles/" + strconv.FormatInt(article.ID, 10)
+	if created.Header().Get("Location") != path {
+		t.Fatal("incorrect Location")
+	}
+	request("GET", path, "", "", 200)
+	request("GET", "/articles", "", "", 200)
+	request("PUT", path, "other", `{"title":"Foreign","body":"Foreign"}`, 403)
+	request("DELETE", path, "other", "", 403)
+	request("PUT", path, "owner", `{"title":"Updated","body":"Updated"}`, 200)
+	deleted := request("DELETE", path, "owner", "", 204)
+	if deleted.Body.Len() != 0 {
+		t.Fatal("DELETE response has a body")
+	}
+	request("DELETE", path, "owner", "", 404)
+	request("PUT", path, "owner", `{"title":"Updated","body":"Updated"}`, 404)
+}
+
+// TestRepositoryDeadlineIntegration checks that waiting for a busy pool is bounded.
+func TestRepositoryDeadlineIntegration(t *testing.T) {
+	source := blogTestPool(t)
+	config := source.Config()
+	config.MaxConns = 1
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	held, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(held.Release)
+	repo := &ArticleRepository{pool: pool}
+	t.Run("create", func(t *testing.T) {
+		t.Parallel()
+		_, err := repo.Create(ctx, 1, "Title", "Body")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected deadline exceeded, got %v", err)
+		}
+		if ctx.Err() != nil {
+			t.Fatal("operation waited for the parent deadline instead of its own")
+		}
+	})
+	t.Run("get", func(t *testing.T) {
+		t.Parallel()
+		_, err := repo.GetByID(ctx, 1)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected deadline exceeded, got %v", err)
+		}
+		if ctx.Err() != nil {
+			t.Fatal("operation waited for the parent deadline instead of its own")
+		}
+	})
+	t.Run("list", func(t *testing.T) {
+		t.Parallel()
+		_, err := repo.GetList(ctx, 20, 0)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected deadline exceeded, got %v", err)
+		}
+		if ctx.Err() != nil {
+			t.Fatal("operation waited for the parent deadline instead of its own")
+		}
+	})
+	t.Run("update", func(t *testing.T) {
+		t.Parallel()
+		_, err := repo.Update(ctx, 1, 1, "Title", "Body")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected deadline exceeded, got %v", err)
+		}
+		if ctx.Err() != nil {
+			t.Fatal("operation waited for the parent deadline instead of its own")
+		}
+	})
+	t.Run("delete", func(t *testing.T) {
+		t.Parallel()
+		err := repo.Delete(ctx, 1, 1)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected deadline exceeded, got %v", err)
+		}
+		if ctx.Err() != nil {
+			t.Fatal("operation waited for the parent deadline instead of its own")
+		}
+	})
 }

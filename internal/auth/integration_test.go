@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -184,4 +185,44 @@ func TestAuthRegistrationAndLoginIntegration(t *testing.T) {
 		t.Fatal("unknown email and wrong password must return the same response")
 	}
 	request("/auth/login", `{"email":"user@example.com","password":"password123"}`, http.StatusOK)
+}
+
+// TestRepositoryDeadlineIntegration checks that waiting for a busy pool is bounded.
+func TestRepositoryDeadlineIntegration(t *testing.T) {
+	source := authTestPool(t)
+	config := source.Config()
+	config.MaxConns = 1
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	held, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(held.Release)
+	repo := &UserRepository{pool: pool}
+	t.Run("create", func(t *testing.T) {
+		t.Parallel()
+		_, err := repo.Create(ctx, "deadline@example.com", "hash")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected deadline exceeded, got %v", err)
+		}
+		if ctx.Err() != nil {
+			t.Fatal("operation waited for the parent deadline instead of its own")
+		}
+	})
+	t.Run("get", func(t *testing.T) {
+		t.Parallel()
+		_, err := repo.GetByEmail(ctx, "deadline@example.com")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected deadline exceeded, got %v", err)
+		}
+		if ctx.Err() != nil {
+			t.Fatal("operation waited for the parent deadline instead of its own")
+		}
+	})
 }

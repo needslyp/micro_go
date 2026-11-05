@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const repositoryQueryTimeout = 3 * time.Second
+
 var (
 	// ErrEmailTaken incdicates that the email is already registered.
 	ErrEmailTaken = errors.New("email already exists")
@@ -40,6 +42,9 @@ type UserRepository struct {
 
 // Create stores a new user with an already hashed password.
 func (r *UserRepository) Create(ctx context.Context, email string, passwordHash string) (User, error) {
+	ctx, cancel := context.WithTimeout(ctx, repositoryQueryTimeout)
+	defer cancel()
+
 	var user User
 	err := r.pool.QueryRow(ctx, `
 		INSERT INTO auth.users (email, password_hash)
@@ -64,6 +69,9 @@ func (r *UserRepository) Create(ctx context.Context, email string, passwordHash 
 
 // GetByEmail finds a user by email.
 func (r *UserRepository) GetByEmail(ctx context.Context, email string) (User, error) {
+	ctx, cancel := context.WithTimeout(ctx, repositoryQueryTimeout)
+	defer cancel()
+
 	email = strings.ToLower(strings.TrimSpace(email))
 
 	var user User
